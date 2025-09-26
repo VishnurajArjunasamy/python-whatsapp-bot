@@ -2,10 +2,16 @@ import logging
 from flask import current_app, jsonify
 import json
 import requests
-
+from mongo_collection.collection import get_collection
 # from app.services.openai_service import generate_response
 import re
+from datetime import datetime
+from bson import ObjectId
 
+
+# simple in-memory state
+user_states = {}
+collection = get_collection()
 
 def log_http_response(response):
     logging.info(f"Status: {response.status_code}")
@@ -24,10 +30,143 @@ def get_text_message_input(recipient, text):
         }
     )
 
+# def handle_text(user, text):
+#     if text == "/start":
+#         state = user_states.get(user, "ASK_NAME")
+#         if state == "ASK_NAME":
+#             response = "Hi, whta's your name"
+#             data = get_text_message_input(user, response)
+#             send_message(data)
+#             user_states[user] = "GOT_NAME"
+#         elif state == "GOT_NAME":
+#             response = "Hi, whta's your age"
+#             data = get_text_message_input(user, response)
+#             send_message(data)
+#             # return "What's your age"
 
-def generate_response(response):
-    # Return text in uppercase
-    return response.upper()
+
+
+def handle_text(user, text):
+    state = user_states.get(user, "START")
+    user_data = collection.find_one({"user_id": user}) or {}
+    
+    if text == "/start":
+        # Create a new conversation
+        conversation_id = ObjectId()
+        conversation = {
+            "conversation_id": conversation_id,
+            "started_at": datetime.utcnow(),
+            "status": "in_progress",
+            "data": {}
+        }
+        
+        # Add conversation to user's conversations array
+        collection.update_one(
+            {"user_id": user},
+            {
+                "$push": {"conversations": conversation},
+                "$set": {"current_conversation_id": conversation_id}
+            },
+            upsert=True
+        )
+        
+        response = "Hi! Welcome! What's your name?"
+        user_states[user] = "WAITING_NAME"
+        data = get_text_message_input(user, response)
+        send_message(data)
+        return
+
+    # Get current conversation
+    current_conversation_id = user_data.get("current_conversation_id")
+    if not current_conversation_id:
+        response = "Please start a new conversation with /start"
+        data = get_text_message_input(user, response)
+        send_message(data)
+        return
+
+    if state == "WAITING_NAME":
+        collection.update_one(
+            {
+                "user_id": user,
+                "conversations.conversation_id": current_conversation_id
+            },
+            {
+                "$set": {
+                    "conversations.$.data.name": text,
+                    "conversations.$.last_updated": datetime.utcnow()
+                }
+            }
+        )
+        response = f"Nice to meet you {text}! Please enter your age:"
+        user_states[user] = "WAITING_AGE"
+        data = get_text_message_input(user, response)
+        send_message(data)
+        return
+
+    if state == "WAITING_AGE":
+        if not text.isdigit():
+            response = "Please enter a valid age (numbers only)"
+            data = get_text_message_input(user, response)
+            send_message(data)
+            return
+            
+        collection.update_one(
+            {
+                "user_id": user,
+                "conversations.conversation_id": current_conversation_id
+            },
+            {
+                "$set": {
+                    "conversations.$.data.age": int(text),
+                    "conversations.$.last_updated": datetime.utcnow()
+                }
+            }
+        )
+        response = "Great! Finally, what's your location (city)?"
+        user_states[user] = "WAITING_LOCATION"
+        data = get_text_message_input(user, response)
+        send_message(data)
+        return
+
+    if state == "WAITING_LOCATION":
+        collection.update_one(
+            {
+                "user_id": user,
+                "conversations.conversation_id": current_conversation_id
+            },
+            {
+                "$set": {
+                    "conversations.$.data.location": text,
+                    "conversations.$.last_updated": datetime.utcnow(),
+                    "conversations.$.status": "completed"
+                }
+            }
+        )
+        
+        # Get the complete conversation data
+        user_doc = collection.find_one(
+            {
+                "user_id": user,
+                "conversations.conversation_id": current_conversation_id
+            },
+            {"conversations.$": 1}
+        )
+        conv_data = user_doc["conversations"][0]["data"]
+        
+        response = f"Perfect! Here's what I know about you:\nName: {conv_data.get('name')}\nAge: {conv_data.get('age')}\nLocation: {text}"
+        user_states[user] = "COMPLETED"
+        data = get_text_message_input(user, response)
+        send_message(data)
+        return
+    
+    response = "To start a new conversyion type /start"
+    data = get_text_message_input(user,response)
+    send_message(data)
+    return
+
+
+def handle_voice(media_id):
+    return f"Got your audio note {media_id} "
 
 
 def send_message(data):
@@ -80,17 +219,28 @@ def process_whatsapp_message(body):
     name = body["entry"][0]["changes"][0]["value"]["contacts"][0]["profile"]["name"]
 
     message = body["entry"][0]["changes"][0]["value"]["messages"][0]
-    message_body = message["text"]["body"]
+    # message_body = message["text"]["body"]
+    receipient_waid = message['from']
 
     # TODO: implement custom function here
-    response = generate_response(message_body)
+    if message['type']=='text':
+        text = message['text']['body'].strip().lower()
+        response = handle_text(receipient_waid,text)
+
+    if message['type'] == 'audio':
+       response = handle_voice(message['audio']['id'])
+
+
+    # response = generate_response(message_body)
 
     # OpenAI Integration
     # response = generate_response(message_body, wa_id, name)
     # response = process_text_for_whatsapp(response)
 
-    data = get_text_message_input(current_app.config["RECIPIENT_WAID"], response)
-    send_message(data)
+    # data = get_text_message_input(current_app.config["RECIPIENT_WAID"], response)
+    # data = get_text_message_input(receipient_waid, response)
+
+    # send_message(data)
 
 
 def is_valid_whatsapp_message(body):

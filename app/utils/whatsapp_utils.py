@@ -7,6 +7,7 @@ from mongo_collection.collection import get_collection
 import re
 from datetime import datetime
 from bson import ObjectId
+import base64
 
 
 # simple in-memory state
@@ -30,23 +31,17 @@ def get_text_message_input(recipient, text):
         }
     )
 
-# def handle_text(user, text):
-#     if text == "/start":
-#         state = user_states.get(user, "ASK_NAME")
-#         if state == "ASK_NAME":
-#             response = "Hi, whta's your name"
-#             data = get_text_message_input(user, response)
-#             send_message(data)
-#             user_states[user] = "GOT_NAME"
-#         elif state == "GOT_NAME":
-#             response = "Hi, whta's your age"
-#             data = get_text_message_input(user, response)
-#             send_message(data)
-#             # return "What's your age"
+def download_audio(media_id):
+    url = f"https://graph.facebook.com/v17.0/{media_id}"
+    headers = {"Authorization": f"Bearer {current_app.config['ACCESS_TOKEN']}"}
+    res = requests.get(url, headers=headers).json()
+    media_url = res["url"]
+    audio_data = requests.get(media_url, headers=headers).content
+    audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+    return audio_base64
 
 
-
-def handle_text(user, text):
+def handle_text(user, text=None):
     state = user_states.get(user, "START")
     user_data = collection.find_one({"user_id": user}) or {}
     
@@ -85,6 +80,11 @@ def handle_text(user, text):
         return
 
     if state == "WAITING_NAME":
+        if not isinstance(text,str):
+            response = "Please enter a valid input"
+            data = get_text_message_input(user, response)
+            send_message(data)
+            return
         collection.update_one(
             {
                 "user_id": user,
@@ -122,13 +122,18 @@ def handle_text(user, text):
                 }
             }
         )
-        response = "Great! Finally, what's your location (city)?"
+        response = "What's your location (city)?"
         user_states[user] = "WAITING_LOCATION"
         data = get_text_message_input(user, response)
         send_message(data)
         return
 
     if state == "WAITING_LOCATION":
+        if not isinstance(text,str):
+            response = "Please enter a valid input"
+            data = get_text_message_input(user, response)
+            send_message(data)
+            return
         collection.update_one(
             {
                 "user_id": user,
@@ -138,12 +143,56 @@ def handle_text(user, text):
                 "$set": {
                     "conversations.$.data.location": text,
                     "conversations.$.last_updated": datetime.utcnow(),
+                    # "conversations.$.status": "completed"
+                }
+            }
+        )
+        response = f"Enter voice message";
+        user_states[user]="WAITING_VOICE"
+        data = get_text_message_input(user,response)
+        send_message(data)
+        return
+    
+    if state == "WAITING_VOICE":
+        if text :
+            response = "Please enter a valid Voice Message"
+            data = get_text_message_input(user, response)
+            send_message(data)
+            return
+
+    response = "Please start a new conversation with /start"
+    data = get_text_message_input(user,response)
+    send_message(data)
+    return
+
+
+def handle_voice(user, media_id):
+    state = user_states.get(user, "START")
+    user_data = collection.find_one({"user_id": user}) or {}
+
+    # Get current conversation
+    current_conversation_id = user_data.get("current_conversation_id")
+    if not current_conversation_id:
+        response = "Please start a new conversation with /start"
+        data = get_text_message_input(user, response)
+        send_message(data)
+        return
+
+    if state == "WAITING_VOICE":
+        audio_base64 = download_audio( media_id)
+        collection.update_one(
+            {
+                "user_id": user,
+                "conversations.conversation_id": current_conversation_id
+            },
+            {
+                "$set": {
+                    "conversations.$.data.audio": audio_base64,
+                    "conversations.$.last_updated": datetime.utcnow(),
                     "conversations.$.status": "completed"
                 }
             }
         )
-        
-        # Get the complete conversation data
         user_doc = collection.find_one(
             {
                 "user_id": user,
@@ -153,20 +202,11 @@ def handle_text(user, text):
         )
         conv_data = user_doc["conversations"][0]["data"]
         
-        response = f"Perfect! Here's what I know about you:\nName: {conv_data.get('name')}\nAge: {conv_data.get('age')}\nLocation: {text}"
+        response = f"Perfect! Thank you for the response."
         user_states[user] = "COMPLETED"
         data = get_text_message_input(user, response)
         send_message(data)
         return
-    
-    response = "To start a new conversyion type /start"
-    data = get_text_message_input(user,response)
-    send_message(data)
-    return
-
-
-def handle_voice(media_id):
-    return f"Got your audio note {media_id} "
 
 
 def send_message(data):
@@ -228,19 +268,7 @@ def process_whatsapp_message(body):
         response = handle_text(receipient_waid,text)
 
     if message['type'] == 'audio':
-       response = handle_voice(message['audio']['id'])
-
-
-    # response = generate_response(message_body)
-
-    # OpenAI Integration
-    # response = generate_response(message_body, wa_id, name)
-    # response = process_text_for_whatsapp(response)
-
-    # data = get_text_message_input(current_app.config["RECIPIENT_WAID"], response)
-    # data = get_text_message_input(receipient_waid, response)
-
-    # send_message(data)
+       response = handle_voice(receipient_waid,message['audio']['id'])
 
 
 def is_valid_whatsapp_message(body):

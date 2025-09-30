@@ -19,6 +19,19 @@ def log_http_response(response):
     logging.info(f"Content-type: {response.headers.get('content-type')}")
     logging.info(f"Body: {response.text}")
 
+def get_image_message_input(recipient, image_url, caption=None):
+    message = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "type": "image",
+        "image": {
+            "link": image_url,
+        }
+    }
+    if caption:
+        message["image"]["caption"] = caption
+    return json.dumps(message)
 
 def get_text_message_input(recipient, text):
     return json.dumps(
@@ -147,7 +160,12 @@ def handle_text(user, text=None):
                 }
             }
         )
-        response = f"Enter voice message";
+
+        image_url="https://gumlet.assettype.com/down-to-earth%2Fimport%2Flibrary%2Flarge%2F2023-01-14%2F0.31624800_1673654981_img_6213.jpg?w=1200&ar=40%3A21&auto=format%2Ccompress&ogImage=true&mode=crop&enlarge=true&overlay=false&overlay_position=bottom&overlay_width=100"
+        image_data = get_image_message_input(user, image_url)
+        send_message(image_data)
+
+        response = f"Describe about the above image";
         user_states[user]="WAITING_VOICE"
         data = get_text_message_input(user,response)
         send_message(data)
